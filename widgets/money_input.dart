@@ -330,7 +330,10 @@ class _QuantityInputState extends State<QuantityInput> {
               suffixText: widget.unit,
             ),
             validator: widget.validator ??
-                (value) => Validators.positiveQuantity(value, widget.labelText),
+                (value) => Validators.positiveQuantity(
+                      value,
+                      widget.labelText ?? 'Jumlah',
+                    ),
             onChanged: (value) {
               final qty = int.tryParse(value) ?? 0;
               widget.onChanged?.call(qty);
