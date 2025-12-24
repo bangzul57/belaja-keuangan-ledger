@@ -1,168 +1,318 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 
 import '../core/database/db_helper.dart';
+import '../core/database/db_migration.dart';
 import '../models/account.dart';
 
-class AccountProvider with ChangeNotifier {
-  // ============================================================
-  // STATE
-  // ============================================================
+/// Provider untuk mengelola data Akun
+class AccountProvider extends ChangeNotifier {
+  final DBHelper _dbHelper = DBHelper.instance;
 
-  List<Map<String, dynamic>> _assetAccounts = [];
+  List<Account> _accounts = [];
+  Account? _selectedAccount;
+  bool _isLoading = false;
+  String? _errorMessage;
 
-  List<Map<String, dynamic>> get assetAccounts => _assetAccounts;
+  // ===== GETTERS =====
 
-  // ============================================================
-  // CONSTANTS
-  // ============================================================
+  List<Account> get accounts => List.unmodifiable(_accounts);
 
-  static const List<String> _protectedAccountIds = [
-    'KAS',
-    'PRIVE',
-    'MODAL',
-    'PENDAPATAN',
-    'BEBAN',
-  ];
+  List<Account> get activeAccounts =>
+      _accounts.where((a) => a.isActive).toList();
 
-  static final List<Account> _defaultAccounts = [
-    Account(
-      id: 'KAS',
-      name: 'Kas',
-      type: 'asset',
-      subType: 'cash',
-      isActive: true,
-    ),
-    Account(
-      id: 'MODAL',
-      name: 'Modal',
-      type: 'equity',
-      subType: 'capital',
-      isActive: true,
-    ),
-    Account(
-      id: 'PRIVE',
-      name: 'Prive',
-      type: 'equity',
-      subType: 'prive',
-      isActive: true,
-    ),
-    Account(
-      id: 'PENDAPATAN',
-      name: 'Pendapatan',
-      type: 'income',
-      subType: 'revenue',
-      isActive: true,
-    ),
-    Account(
-      id: 'BEBAN',
-      name: 'Beban',
-      type: 'expense',
-      subType: 'expense',
-      isActive: true,
-    ),
-  ];
+  Account? get selectedAccount => _selectedAccount;
 
-  // ============================================================
-  // LOAD METHODS
-  // ============================================================
+  bool get isLoading => _isLoading;
 
-  Future<void> loadAssetAccounts() async {
-    final db = await DBHelper.database;
+  String? get errorMessage => _errorMessage;
 
-    final result = await db.rawQuery('''
-      SELECT 
-        a.id,
-        a.name,
-        a.sub_type,
-        COALESCE(SUM(j.debit - j.credit), 0) AS balance
-      FROM accounts a
-      LEFT JOIN journal_entries j ON j.account_id = a.id
-      WHERE a.type = 'asset' AND a.is_active = 1
-      GROUP BY a.id
-      ORDER BY a.name ASC
-    ''');
+  /// Akun kas (default)
+  Account? get cashAccount => _accounts.firstWhere(
+        (a) => a.type == AccountType.cash && a.isDefault && a.isActive,
+        orElse: () => _accounts.firstWhere(
+          (a) => a.type == AccountType.cash && a.isActive,
+          orElse: () => _accounts.first,
+        ),
+      );
 
-    _assetAccounts = result;
+  /// Semua akun kas
+  List<Account> get cashAccounts =>
+      activeAccounts.where((a) => a.type == AccountType.cash).toList();
+
+  /// Semua akun digital (e-wallet)
+  List<Account> get digitalAccounts =>
+      activeAccounts.where((a) => a.type == AccountType.digital).toList();
+
+  /// Semua akun bank
+  List<Account> get bankAccounts =>
+      activeAccounts.where((a) => a.type == AccountType.bank).toList();
+
+  /// Semua akun aset (kas + digital + bank)
+  List<Account> get assetAccounts =>
+      activeAccounts.where((a) => a.type != AccountType.receivable).toList();
+
+  /// Semua akun digital dan bank (untuk transaksi digital)
+  List<Account> get digitalAndBankAccounts => activeAccounts
+      .where((a) =>
+          a.type == AccountType.digital || a.type == AccountType.bank)
+      .toList();
+
+  /// Total saldo semua akun aset
+  double get totalAssetBalance => assetAccounts.fold(
+        0.0,
+        (sum, account) => sum + account.balance,
+      );
+
+  /// Total saldo kas
+  double get totalCashBalance => cashAccounts.fold(
+        0.0,
+        (sum, account) => sum + account.balance,
+      );
+
+  /// Total saldo digital
+  double get totalDigitalBalance => digitalAccounts.fold(
+        0.0,
+        (sum, account) => sum + account.balance,
+      );
+
+  // ===== CRUD OPERATIONS =====
+
+  /// Load semua akun dari database
+  Future<void> loadAccounts() async {
+    _setLoading(true);
+    _clearError();
+
+    try {
+      final maps = await _dbHelper.queryAll(
+        DBMigration.tableAccounts,
+        where: 'is_active = ?',
+        whereArgs: [1],
+        orderBy: 'is_default DESC, name ASC',
+      );
+
+      _accounts = maps.map((map) => Account.fromMap(map)).toList();
+      notifyListeners();
+    } catch (e) {
+      _setError('Gagal memuat data akun: $e');
+    } finally {
+      _setLoading(false);
+    }
+  }
+
+  /// Tambah akun baru
+  Future<bool> addAccount(Account account) async {
+    _clearError();
+
+    try {
+      // Validasi nama tidak duplikat
+      final existing = _accounts.where(
+        (a) => a.name.toLowerCase() == account.name.toLowerCase() && a.isActive,
+      );
+      if (existing.isNotEmpty) {
+        _setError('Akun dengan nama "${account.name}" sudah ada');
+        return false;
+      }
+
+      final id = await _dbHelper.insert(
+        DBMigration.tableAccounts,
+        account.toMap(),
+      );
+
+      final newAccount = account.copyWith(id: id);
+      _accounts.add(newAccount);
+      _sortAccounts();
+      notifyListeners();
+
+      return true;
+    } catch (e) {
+      _setError('Gagal menambah akun: $e');
+      return false;
+    }
+  }
+
+  /// Update akun
+  Future<bool> updateAccount(Account account) async {
+    _clearError();
+
+    if (account.id == null) {
+      _setError('ID akun tidak valid');
+      return false;
+    }
+
+    try {
+      final updatedAccount = account.copyWith(updatedAt: DateTime.now());
+
+      await _dbHelper.updateById(
+        DBMigration.tableAccounts,
+        account.id!,
+        updatedAccount.toMap(),
+      );
+
+      final index = _accounts.indexWhere((a) => a.id == account.id);
+      if (index != -1) {
+        _accounts[index] = updatedAccount;
+        _sortAccounts();
+        notifyListeners();
+      }
+
+      return true;
+    } catch (e) {
+      _setError('Gagal mengupdate akun: $e');
+      return false;
+    }
+  }
+
+  /// Update saldo akun
+  Future<bool> updateBalance(int accountId, double newBalance) async {
+    _clearError();
+
+    try {
+      final account = getAccountById(accountId);
+      if (account == null) {
+        _setError('Akun tidak ditemukan');
+        return false;
+      }
+
+      final updatedAccount = account.copyWith(
+        balance: newBalance,
+        updatedAt: DateTime.now(),
+      );
+
+      await _dbHelper.updateById(
+        DBMigration.tableAccounts,
+        accountId,
+        {'balance': newBalance, 'updated_at': DateTime.now().toIso8601String()},
+      );
+
+      final index = _accounts.indexWhere((a) => a.id == accountId);
+      if (index != -1) {
+        _accounts[index] = updatedAccount;
+        notifyListeners();
+      }
+
+      return true;
+    } catch (e) {
+      _setError('Gagal mengupdate saldo: $e');
+      return false;
+    }
+  }
+
+  /// Adjust saldo (tambah/kurang)
+  Future<bool> adjustBalance(int accountId, double adjustment) async {
+    final account = getAccountById(accountId);
+    if (account == null) {
+      _setError('Akun tidak ditemukan');
+      return false;
+    }
+
+    final newBalance = account.balance + adjustment;
+    if (newBalance < 0) {
+      _setError('Saldo tidak mencukupi');
+      return false;
+    }
+
+    return updateBalance(accountId, newBalance);
+  }
+
+  /// Soft delete akun (set is_active = 0)
+  Future<bool> deleteAccount(int accountId) async {
+    _clearError();
+
+    try {
+      final account = getAccountById(accountId);
+      if (account == null) {
+        _setError('Akun tidak ditemukan');
+        return false;
+      }
+
+      if (account.isDefault) {
+        _setError('Tidak dapat menghapus akun default');
+        return false;
+      }
+
+      await _dbHelper.softDelete(DBMigration.tableAccounts, accountId);
+
+      _accounts.removeWhere((a) => a.id == accountId);
+      notifyListeners();
+
+      return true;
+    } catch (e) {
+      _setError('Gagal menghapus akun: $e');
+      return false;
+    }
+  }
+
+  // ===== HELPER METHODS =====
+
+  /// Cari akun berdasarkan ID
+  Account? getAccountById(int id) {
+    try {
+      return _accounts.firstWhere((a) => a.id == id);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Cari akun berdasarkan nama
+  Account? getAccountByName(String name) {
+    try {
+      return _accounts.firstWhere(
+        (a) => a.name.toLowerCase() == name.toLowerCase() && a.isActive,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Set akun yang dipilih
+  void selectAccount(Account? account) {
+    _selectedAccount = account;
     notifyListeners();
   }
 
-  // ============================================================
-  // LOAD RECEIVABLE (HUTANG PELANGGAN)
-  // ============================================================
-
-  Future<List<Map<String, dynamic>>> loadReceivables() async {
-    final db = await DBHelper.database;
-
-    return await db.rawQuery('''
-      SELECT 
-        a.id,
-        a.name,
-        COALESCE(SUM(j.debit - j.credit), 0) AS balance
-      FROM accounts a
-      LEFT JOIN journal_entries j ON j.account_id = a.id
-      WHERE a.sub_type = 'receivable'
-        AND a.is_active = 1
-      GROUP BY a.id
-      HAVING balance != 0
-      ORDER BY a.name ASC
-    ''');
+  /// Cek apakah saldo mencukupi
+  bool hasSufficientBalance(int accountId, double amount) {
+    final account = getAccountById(accountId);
+    return account != null && account.balance >= amount;
   }
 
-  // ============================================================
-  // SEED METHODS
-  // ============================================================
-
-  Future<void> seedDefaultAccounts() async {
-    final db = await DBHelper.database;
-
-    final result = await db.rawQuery(
-      'SELECT COUNT(*) AS count FROM accounts',
-    );
-    final count = result.first['count'] as int;
-
-    if (count > 0) return;
-
-    for (final acc in _defaultAccounts) {
-      await db.insert('accounts', acc.toMap());
-    }
+  /// Refresh data dari database
+  Future<void> refresh() async {
+    await loadAccounts();
   }
 
-  // ============================================================
-  // CRUD METHODS
-  // ============================================================
+  // ===== PRIVATE METHODS =====
 
-  Future<void> addAccount(Account account) async {
-    final db = await DBHelper.database;
-    await db.insert('accounts', account.toMap());
-    await loadAssetAccounts();
+  void _sortAccounts() {
+    _accounts.sort((a, b) {
+      // Default account first
+      if (a.isDefault && !b.isDefault) return -1;
+      if (!a.isDefault && b.isDefault) return 1;
+      // Then by type
+      final typeCompare = a.type.index.compareTo(b.type.index);
+      if (typeCompare != 0) return typeCompare;
+      // Then by name
+      return a.name.compareTo(b.name);
+    });
   }
 
-  Future<void> deactivateAccount(String accountId) async {
-    if (_protectedAccountIds.contains(accountId)) {
-      throw Exception('Akun sistem tidak boleh dihapus');
-    }
+  void _setLoading(bool value) {
+    _isLoading = value;
+    notifyListeners();
+  }
 
-    final db = await DBHelper.database;
+  void _setError(String message) {
+    _errorMessage = message;
+    notifyListeners();
+  }
 
-    final result = await db.rawQuery('''
-      SELECT COALESCE(SUM(debit - credit), 0) AS balance
-      FROM journal_entries
-      WHERE account_id = ?
-    ''', [accountId]);
+  void _clearError() {
+    _errorMessage = null;
+  }
 
-    final balance = (result.first['balance'] as num).toInt();
-
-    if (balance != 0) {
-      throw Exception('Saldo akun harus 0 sebelum dihapus');
-    }
-
-    await db.update(
-      'accounts',
-      {'is_active': 0},
-      where: 'id = ?',
-      whereArgs: [accountId],
-    );
-
-    await loadAssetAccounts();
+  /// Clear error message
+  void clearError() {
+    _clearError();
+    notifyListeners();
   }
 }
