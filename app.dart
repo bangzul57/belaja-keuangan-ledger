@@ -68,7 +68,7 @@ class MyApp extends StatelessWidget {
         backgroundColor: isDark ? colorScheme.surface : colorScheme.surface,
         foregroundColor: colorScheme.onSurface,
       ),
-      cardTheme: CardTheme(
+      cardTheme: CardThemeData(  // FIXED: Changed from CardTheme to CardThemeData
         elevation: 0,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
@@ -80,8 +80,8 @@ class MyApp extends StatelessWidget {
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: isDark
-            ? colorScheme.surfaceVariant.withOpacity(0.3)
-            : colorScheme.surfaceVariant.withOpacity(0.5),
+            ? colorScheme.surfaceContainerHighest.withOpacity(0.3)
+            : colorScheme.surfaceContainerHighest.withOpacity(0.5),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
           borderSide: BorderSide.none,
@@ -184,7 +184,7 @@ class MyApp extends StatelessWidget {
           ),
         ),
       ),
-      dialogTheme: DialogTheme(
+      dialogTheme: DialogThemeData(  // FIXED: Changed from DialogTheme to DialogThemeData
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(16),
         ),
