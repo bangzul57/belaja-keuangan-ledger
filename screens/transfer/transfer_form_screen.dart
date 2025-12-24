@@ -1,9 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../../core/constants/app_colors.dart';
+import '../../core/constants/app_strings.dart';
+import '../../core/utils/formatters.dart';
+import '../../core/utils/validators.dart';
+import '../../models/account.dart';
 import '../../providers/account_provider.dart';
-import '../../providers/ledger_provider.dart';
+import '../../providers/transaction_provider.dart';
+import '../../widgets/confirm_dialog.dart';
+import '../../widgets/money_input.dart';
+import '../../widgets/primary_button.dart';
 
+/// Form untuk transfer antar akun
 class TransferFormScreen extends StatefulWidget {
   const TransferFormScreen({super.key});
 
@@ -12,239 +21,439 @@ class TransferFormScreen extends StatefulWidget {
 }
 
 class _TransferFormScreenState extends State<TransferFormScreen> {
-  // ============================================================
-  // FORM STATE
-  // ============================================================
-
   final _formKey = GlobalKey<FormState>();
-  final _transferController = TextEditingController();
-  final _adminController = TextEditingController(text: '0');
-  final _noteController = TextEditingController();
+  final _amountController = TextEditingController();
+  final _adminFeeController = TextEditingController();
+  final _notesController = TextEditingController();
 
-  String? _fromAccountId;
-  String? _toAccountId;
-  bool _saving = false;
-
-  int get _transferAmount =>
-      int.tryParse(_transferController.text.replaceAll('.', '')) ?? 0;
-
-  int get _adminFee =>
-      int.tryParse(_adminController.text.replaceAll('.', '')) ?? 0;
-
-  int get _receivedAmount => _transferAmount - _adminFee;
-
-  // ============================================================
-  // LIFECYCLE
-  // ============================================================
+  Account? _sourceAccount;
+  Account? _destinationAccount;
 
   @override
   void dispose() {
-    _transferController.dispose();
-    _adminController.dispose();
-    _noteController.dispose();
+    _amountController.dispose();
+    _adminFeeController.dispose();
+    _notesController.dispose();
     super.dispose();
   }
 
-  // ============================================================
-  // BUILD
-  // ============================================================
+  double get _amount => Validators.parseAmount(_amountController.text);
+  double get _adminFee => Validators.parseAmount(_adminFeeController.text);
+  double get _totalDeduction => _amount + _adminFee;
+
+  void _swapAccounts() {
+    setState(() {
+      final temp = _sourceAccount;
+      _sourceAccount = _destinationAccount;
+      _destinationAccount = temp;
+    });
+  }
+
+  Future<void> _submitTransfer() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    if (_sourceAccount == null || _destinationAccount == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Pilih akun asal dan tujuan')),
+      );
+      return;
+    }
+
+    if (_sourceAccount!.id == _destinationAccount!.id) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Akun asal dan tujuan tidak boleh sama'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    // Validasi saldo
+    if (!_sourceAccount!.hasSufficientBalance(_totalDeduction)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Saldo ${_sourceAccount!.name} tidak mencukupi'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+      return;
+    }
+
+    // Konfirmasi
+    final confirmed = await ConfirmDialog.show(
+      context: context,
+      title: 'Konfirmasi Transfer',
+      message: _buildConfirmMessage(),
+      confirmText: 'Proses',
+    );
+
+    if (!confirmed) return;
+
+    final transactionProvider = context.read<TransactionProvider>();
+
+    final success = await transactionProvider.processTransfer(
+      sourceAccountId: _sourceAccount!.id!,
+      destinationAccountId: _destinationAccount!.id!,
+      amount: _amount,
+      adminFee: _adminFee,
+      notes: _notesController.text.trim().isNotEmpty
+          ? _notesController.text.trim()
+          : null,
+    );
+
+    if (success && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Transfer berhasil'),
+          backgroundColor: AppColors.success,
+        ),
+      );
+      Navigator.pop(context);
+    } else if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(transactionProvider.errorMessage ?? 'Transfer gagal'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
+  }
+
+  String _buildConfirmMessage() {
+    final buffer = StringBuffer();
+    buffer.writeln('Dari: ${_sourceAccount?.name}');
+    buffer.writeln('Ke: ${_destinationAccount?.name}');
+    buffer.writeln('');
+    buffer.writeln('Nominal: ${Formatters.formatCurrency(_amount)}');
+    if (_adminFee > 0) {
+      buffer.writeln('Biaya Admin: ${Formatters.formatCurrency(_adminFee)}');
+      buffer.writeln('Total Pengurangan: ${Formatters.formatCurrency(_totalDeduction)}');
+    }
+    buffer.writeln('');
+    buffer.writeln('${_sourceAccount?.name}: -${Formatters.formatCurrency(_totalDeduction)}');
+    buffer.writeln('${_destinationAccount?.name}: +${Formatters.formatCurrency(_amount)}');
+
+    return buffer.toString();
+  }
 
   @override
   Widget build(BuildContext context) {
-    final accounts = context.watch<AccountProvider>().assetAccounts;
+    final theme = Theme.of(context);
+    final accountProvider = context.watch<AccountProvider>();
+    final transactionProvider = context.watch<TransactionProvider>();
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Transfer Antar Akun'),
+        title: const Text(AppStrings.transfer),
       ),
-      body: accounts.isEmpty
-          ? const Center(child: Text('Belum ada akun'))
-          : Padding(
-              padding: const EdgeInsets.all(16),
-              child: Form(
-                key: _formKey,
-                child: ListView(
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            // Source Account
+            Text(
+              'Dari Akun',
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            _buildAccountDropdown(
+              value: _sourceAccount,
+              accounts: accountProvider.assetAccounts,
+              excludeId: _destinationAccount?.id,
+              onChanged: (account) {
+                setState(() {
+                  _sourceAccount = account;
+                });
+              },
+              hint: 'Pilih akun asal',
+            ),
+
+            const SizedBox(height: 16),
+
+            // Swap Button
+            Center(
+              child: IconButton.filled(
+                onPressed: _swapAccounts,
+                icon: const Icon(Icons.swap_vert),
+                tooltip: 'Tukar Akun',
+              ),
+            ),
+
+            const SizedBox(height: 16),
+
+            // Destination Account
+            Text(
+              'Ke Akun',
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            _buildAccountDropdown(
+              value: _destinationAccount,
+              accounts: accountProvider.assetAccounts,
+              excludeId: _sourceAccount?.id,
+              onChanged: (account) {
+                setState(() {
+                  _destinationAccount = account;
+                });
+              },
+              hint: 'Pilih akun tujuan',
+            ),
+
+            const SizedBox(height: 24),
+
+            // Amount
+            MoneyInput(
+              controller: _amountController,
+              labelText: 'Nominal Transfer',
+              validator: (value) {
+                final error = Validators.positiveAmount(value, 'Nominal');
+                if (error != null) return error;
+
+                if (_sourceAccount != null) {
+                  final total = Validators.parseAmount(value) + _adminFee;
+                  if (total > _sourceAccount!.balance) {
+                    return 'Saldo tidak mencukupi';
+                  }
+                }
+                return null;
+              },
+              onChanged: (_) => setState(() {}),
+            ),
+
+            const SizedBox(height: 16),
+
+            // Admin Fee
+            MoneyInput(
+              controller: _adminFeeController,
+              labelText: 'Biaya Admin (Opsional)',
+              hintText: '0',
+              helperText: 'Biaya admin akan mengurangi saldo asal',
+              onChanged: (_) => setState(() {}),
+            ),
+
+            const SizedBox(height: 24),
+
+            // Summary
+            if (_amount > 0) _buildSummary(theme),
+
+            const SizedBox(height: 16),
+
+            // Notes
+            TextFormField(
+              controller: _notesController,
+              decoration: const InputDecoration(
+                labelText: 'Catatan (Opsional)',
+                prefixIcon: Icon(Icons.notes),
+              ),
+              maxLines: 2,
+            ),
+
+            const SizedBox(height: 32),
+
+            // Submit Button
+            PrimaryButton(
+              text: 'Proses Transfer',
+              icon: Icons.swap_horiz,
+              isLoading: transactionProvider.isProcessing,
+              onPressed: _submitTransfer,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAccountDropdown({
+    required Account? value,
+    required List<Account> accounts,
+    required ValueChanged<Account?> onChanged,
+    required String hint,
+    int? excludeId,
+  }) {
+    final theme = Theme.of(context);
+    final filteredAccounts = excludeId != null
+        ? accounts.where((a) => a.id != excludeId).toList()
+        : accounts;
+
+    return DropdownButtonFormField<Account>(
+      value: value,
+      decoration: InputDecoration(
+        hintText: hint,
+        prefixIcon: const Icon(Icons.account_balance_wallet),
+      ),
+      items: filteredAccounts.map((account) {
+        final color = AppColors.getAccountTypeColor(account.type.value);
+        return DropdownMenuItem(
+          value: account,
+          child: Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: color,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    _buildFromAccountDropdown(accounts),
-                    const SizedBox(height: 12),
-                    _buildToAccountDropdown(accounts),
-                    const SizedBox(height: 12),
-                    _buildTransferAmountField(),
-                    const SizedBox(height: 12),
-                    _buildAdminFeeField(),
-                    const SizedBox(height: 8),
-                    _buildReceivedInfo(),
-                    const SizedBox(height: 16),
-                    _buildNoteField(),
-                    const SizedBox(height: 24),
-                    _buildSaveButton(),
+                    Text(account.name),
+                    Text(
+                      account.type.label,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
                   ],
                 ),
               ),
-            ),
-    );
-  }
-
-  // ============================================================
-  // UI COMPONENTS
-  // ============================================================
-
-  Widget _buildFromAccountDropdown(List<Map<String, dynamic>> accounts) {
-    return DropdownButtonFormField<String>(
-      value: _fromAccountId,
-      decoration: const InputDecoration(labelText: 'Dari Akun'),
-      items: accounts
-          .map(
-            (a) => DropdownMenuItem<String>(
-              value: a['id'] as String?,
-              child: Text(a['name'] as String? ?? ''),
-            ),
-          )
-          .toList(),
-      onChanged: (value) => setState(() => _fromAccountId = value),
-      validator: (value) => value == null ? 'Pilih akun sumber' : null,
-    );
-  }
-
-  Widget _buildToAccountDropdown(List<Map<String, dynamic>> accounts) {
-    return DropdownButtonFormField<String>(
-      value: _toAccountId,
-      decoration: const InputDecoration(labelText: 'Ke Akun'),
-      items: accounts
-          .map(
-            (a) => DropdownMenuItem<String>(
-              value: a['id'] as String?,
-              child: Text(a['name'] as String? ?? ''),
-            ),
-          )
-          .toList(),
-      onChanged: (value) => setState(() => _toAccountId = value),
-      validator: (value) => value == null ? 'Pilih akun tujuan' : null,
-    );
-  }
-
-  Widget _buildTransferAmountField() {
-    return TextFormField(
-      controller: _transferController,
-      keyboardType: TextInputType.number,
-      decoration: const InputDecoration(
-        labelText: 'Nominal Transfer (keluar dari akun sumber)',
-        hintText: 'Contoh: 300000',
-      ),
+              Text(
+                Formatters.formatCurrency(account.balance),
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+      onChanged: onChanged,
       validator: (value) {
-        final val = int.tryParse(value ?? '') ?? 0;
-        if (val <= 0) return 'Nominal tidak valid';
+        if (value == null) return 'Pilih akun';
         return null;
       },
-      onChanged: (_) => setState(() {}),
     );
   }
 
-  Widget _buildAdminFeeField() {
-    return TextFormField(
-      controller: _adminController,
-      keyboardType: TextInputType.number,
-      decoration: const InputDecoration(
-        labelText: 'Biaya Admin (opsional)',
+  Widget _buildSummary(ThemeData theme) {
+    final hasAdminFee = _adminFee > 0;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.primary.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: theme.colorScheme.primary.withOpacity(0.2),
+        ),
       ),
-      onChanged: (_) => setState(() {}),
-    );
-  }
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Ringkasan Transfer',
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.bold,
+              color: theme.colorScheme.primary,
+            ),
+          ),
+          const SizedBox(height: 12),
 
-  Widget _buildReceivedInfo() {
-    if (_transferAmount <= 0) {
-      return const SizedBox.shrink();
-    }
+          _buildSummaryRow(
+            theme,
+            label: 'Nominal Transfer',
+            value: Formatters.formatCurrency(_amount),
+          ),
 
-    if (_receivedAmount < 0) {
-      return const Text(
-        'Biaya admin melebihi nominal transfer',
-        style: TextStyle(color: Colors.red),
-      );
-    }
+          if (hasAdminFee) ...[
+            const SizedBox(height: 8),
+            _buildSummaryRow(
+              theme,
+              label: 'Biaya Admin',
+              value: Formatters.formatCurrency(_adminFee),
+              valueColor: AppColors.error,
+            ),
+          ],
 
-    return Text(
-      'Akun tujuan akan menerima: Rp $_receivedAmount',
-      style: const TextStyle(
-        color: Colors.grey,
-        fontWeight: FontWeight.w500,
+          const Divider(height: 24),
+
+          if (_sourceAccount != null)
+            _buildSummaryRow(
+              theme,
+              label: _sourceAccount!.name,
+              value: '- ${Formatters.formatCurrency(_totalDeduction)}',
+              valueColor: AppColors.error,
+              isBold: true,
+            ),
+
+          if (_destinationAccount != null) ...[
+            const SizedBox(height: 8),
+            _buildSummaryRow(
+              theme,
+              label: _destinationAccount!.name,
+              value: '+ ${Formatters.formatCurrency(_amount)}',
+              valueColor: AppColors.success,
+              isBold: true,
+            ),
+          ],
+
+          if (hasAdminFee) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.warning.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.info_outline,
+                    size: 14,
+                    color: AppColors.warning,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Biaya admin tidak ditambahkan ke akun tujuan',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: AppColors.warning,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
       ),
     );
   }
 
-  Widget _buildNoteField() {
-    return TextFormField(
-      controller: _noteController,
-      decoration: const InputDecoration(labelText: 'Catatan'),
-    );
-  }
-
-  Widget _buildSaveButton() {
-    return ElevatedButton(
-      onPressed: _saving ? null : _handleSave,
-      child: _saving
-          ? const SizedBox(
-              height: 20,
-              width: 20,
-              child: CircularProgressIndicator(strokeWidth: 2),
-            )
-          : const Text('Simpan Transfer'),
-    );
-  }
-
-  // ============================================================
-  // ACTIONS
-  // ============================================================
-
-  Future<void> _handleSave() async {
-    if (!_formKey.currentState!.validate()) return;
-
-    if (_fromAccountId == _toAccountId) {
-      _showError('Akun sumber dan tujuan tidak boleh sama');
-      return;
-    }
-
-    if (_adminFee < 0 || _adminFee > _transferAmount) {
-      _showError('Biaya admin tidak valid');
-      return;
-    }
-
-    setState(() => _saving = true);
-
-    try {
-      await _saveTransfer();
-      if (!mounted) return;
-      Navigator.pop(context);
-    } catch (e) {
-      _showError(e.toString().replaceAll('Exception: ', ''));
-    } finally {
-      if (mounted) setState(() => _saving = false);
-    }
-  }
-
-  Future<void> _saveTransfer() async {
-    final ledgerProvider = context.read<LedgerProvider>();
-    final accountProvider = context.read<AccountProvider>();
-
-    await ledgerProvider.transferWithAdmin(
-      fromAccountId: _fromAccountId!,
-      toAccountId: _toAccountId!,
-      transferAmount: _transferAmount,
-      adminFee: _adminFee,
-      note: _noteController.text.trim(),
-    );
-
-    if (!mounted) return;
-    await accountProvider.loadAssetAccounts();
-  }
-
-  void _showError(String message) {
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.red,
-      ),
+  Widget _buildSummaryRow(
+    ThemeData theme, {
+    required String label,
+    required String value,
+    Color? valueColor,
+    bool isBold = false,
+  }) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          label,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            fontWeight: isBold ? FontWeight.w600 : FontWeight.normal,
+          ),
+        ),
+        Text(
+          value,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+            color: valueColor,
+          ),
+        ),
+      ],
     );
   }
 }
