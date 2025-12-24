@@ -14,7 +14,7 @@ import '../../widgets/confirm_dialog.dart';
 import '../../widgets/money_input.dart';
 import '../../widgets/primary_button.dart';
 
-/// Form untuk transaksi digital
+/// Form untuk transaksi digital (beli/jual saldo)
 class DigitalFormScreen extends StatefulWidget {
   const DigitalFormScreen({super.key});
 
@@ -33,44 +33,36 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
   Account? _selectedDigitalAccount;
   Account? _selectedCashAccount;
   bool _isCredit = false;
-  bool _useCustomAdminFee = false;
+  bool _usePercentageAdmin = false;
+  bool _showQuickCalc = false;
   DateTime? _dueDate;
 
-  double _calculatedProfit = 0;
-  double _calculatedTotal = 0;
+  // Quick calc
+  final _receivedController = TextEditingController();
+  double _changeAmount = 0;
 
   @override
   void initState() {
     super.initState();
-    _initDefaultValues();
+    _initializeDefaults();
   }
 
-  void _initDefaultValues() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final accountProvider = context.read<AccountProvider>();
-      final settingsProvider = context.read<SettingsProvider>();
+  void _initializeDefaults() {
+    final settingsProvider = context.read<SettingsProvider>();
+    final accountProvider = context.read<AccountProvider>();
 
-      // Set default accounts
-      final digitalAccounts = accountProvider.digitalAndBankAccounts;
-      final cashAccount = accountProvider.cashAccount;
+    _usePercentageAdmin = settingsProvider.usePercentageAdmin;
+    _adminFeeController.text = _usePercentageAdmin
+        ? settingsProvider.defaultAdminPercentage.toString()
+        : Formatters.formatNumber(settingsProvider.defaultAdminFee);
 
-      if (digitalAccounts.isNotEmpty) {
-        setState(() {
-          _selectedDigitalAccount = digitalAccounts.first;
-        });
-      }
+    // Set default cash account
+    _selectedCashAccount = accountProvider.cashAccount;
 
-      if (cashAccount != null) {
-        setState(() {
-          _selectedCashAccount = cashAccount;
-        });
-      }
-
-      // Set default admin fee
-      _adminFeeController.text = Formatters.formatNumber(
-        settingsProvider.defaultAdminFee,
-      );
-    });
+    // Set default digital account (first one)
+    if (accountProvider.digitalAndBankAccounts.isNotEmpty) {
+      _selectedDigitalAccount = accountProvider.digitalAndBankAccounts.first;
+    }
   }
 
   @override
@@ -79,29 +71,53 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
     _adminFeeController.dispose();
     _buyerNameController.dispose();
     _notesController.dispose();
+    _receivedController.dispose();
     super.dispose();
   }
 
-  void _calculateProfit() {
-    final amount = Validators.parseAmount(_amountController.text);
-    final adminFee = Validators.parseAmount(_adminFeeController.text);
+  double get _amount => Validators.parseAmount(_amountController.text);
 
+  double get _adminFee {
+    if (_usePercentageAdmin) {
+      final percentage = double.tryParse(_adminFeeController.text) ?? 0;
+      return _amount * (percentage / 100);
+    }
+    return Validators.parseAmount(_adminFeeController.text);
+  }
+
+  double get _totalTransaction {
+    switch (_selectedMode) {
+      case DigitalTransactionMode.buyBalance:
+        return _amount + _adminFee; // Pembeli bayar nominal + admin
+      case DigitalTransactionMode.sellBalanceDeduct:
+        return _amount - _adminFee; // Owner bayar nominal - admin
+      case DigitalTransactionMode.sellBalanceCash:
+        return _amount; // Owner bayar nominal penuh, admin terpisah
+      default:
+        return _amount;
+    }
+  }
+
+  void _calculateChange() {
+    final received = Validators.parseAmount(_receivedController.text);
     setState(() {
-      _calculatedProfit = adminFee;
-      switch (_selectedMode) {
-        case DigitalTransactionMode.buyBalance:
-          _calculatedTotal = amount + adminFee;
-          break;
-        case DigitalTransactionMode.sellBalanceDeduct:
-          _calculatedTotal = amount - adminFee;
-          break;
-        case DigitalTransactionMode.sellBalanceCash:
-          _calculatedTotal = amount;
-          break;
-        default:
-          _calculatedTotal = amount;
-      }
+      _changeAmount = received - _totalTransaction;
     });
+  }
+
+  Future<void> _selectDueDate() async {
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: _dueDate ?? DateTime.now().add(const Duration(days: 7)),
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+    );
+
+    if (picked != null) {
+      setState(() {
+        _dueDate = picked;
+      });
+    }
   }
 
   Future<void> _submitTransaction() async {
@@ -121,12 +137,12 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
       return;
     }
 
-    // Confirm dialog
+    // Konfirmasi
     final confirmed = await ConfirmDialog.show(
       context: context,
       title: AppStrings.confirmTransaction,
-      message: _buildConfirmMessage(),
-      confirmText: 'Simpan',
+      message: _buildConfirmationMessage(),
+      confirmText: 'Proses',
       type: ConfirmDialogType.confirm,
     );
 
@@ -134,15 +150,12 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
 
     final transactionProvider = context.read<TransactionProvider>();
 
-    final amount = Validators.parseAmount(_amountController.text);
-    final adminFee = Validators.parseAmount(_adminFeeController.text);
-
     final success = await transactionProvider.processDigitalTransaction(
       mode: _selectedMode,
       digitalAccountId: _selectedDigitalAccount!.id!,
       cashAccountId: _selectedCashAccount!.id!,
-      amount: amount,
-      adminFee: adminFee,
+      amount: _amount,
+      adminFee: _adminFee,
       buyerName: _buyerNameController.text.trim().isNotEmpty
           ? _buyerNameController.text.trim()
           : null,
@@ -150,14 +163,15 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
           ? _notesController.text.trim()
           : null,
       isCredit: _isCredit,
-      dueDate: _dueDate,
+      dueDate: _isCredit ? _dueDate : null,
     );
 
     if (success && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(AppStrings.transactionSaved),
+        SnackBar(
+          content: const Text(AppStrings.transactionSaved),
           backgroundColor: AppColors.success,
+          behavior: SnackBarBehavior.floating,
         ),
       );
       Navigator.pop(context);
@@ -166,28 +180,25 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
         SnackBar(
           content: Text(transactionProvider.errorMessage ?? AppStrings.errorSaving),
           backgroundColor: AppColors.error,
+          behavior: SnackBarBehavior.floating,
         ),
       );
     }
   }
 
-  String _buildConfirmMessage() {
-    final amount = Validators.parseAmount(_amountController.text);
-    final adminFee = Validators.parseAmount(_adminFeeController.text);
-
+  String _buildConfirmationMessage() {
     final buffer = StringBuffer();
     buffer.writeln('Mode: ${_selectedMode.label}');
-    buffer.writeln('Nominal: ${Formatters.formatCurrency(amount)}');
-    buffer.writeln('Admin: ${Formatters.formatCurrency(adminFee)}');
-    buffer.writeln('');
     buffer.writeln('Akun Digital: ${_selectedDigitalAccount?.name}');
     buffer.writeln('Akun Kas: ${_selectedCashAccount?.name}');
+    buffer.writeln('Nominal: ${Formatters.formatCurrency(_amount)}');
+    buffer.writeln('Admin: ${Formatters.formatCurrency(_adminFee)}');
+    buffer.writeln('Total: ${Formatters.formatCurrency(_totalTransaction)}');
 
     if (_isCredit) {
-      buffer.writeln('');
-      buffer.writeln('⚠️ Transaksi ini adalah HUTANG');
-      if (_buyerNameController.text.isNotEmpty) {
-        buffer.writeln('Pembeli: ${_buyerNameController.text}');
+      buffer.writeln('\n⚠️ Transaksi ini akan dicatat sebagai HUTANG');
+      if (_dueDate != null) {
+        buffer.writeln('Jatuh Tempo: ${Formatters.formatDate(_dueDate)}');
       }
     }
 
@@ -197,65 +208,223 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final accountProvider = context.watch<AccountProvider>();
+    final transactionProvider = context.watch<TransactionProvider>();
 
     return Scaffold(
       appBar: AppBar(
         title: const Text('Transaksi Digital'),
       ),
-      body: Consumer<TransactionProvider>(
-        builder: (context, transactionProvider, _) {
-          return Form(
-            key: _formKey,
-            child: ListView(
-              padding: const EdgeInsets.all(16),
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            // Transaction Mode Selection
+            _buildModeSelection(theme),
+
+            const SizedBox(height: 24),
+
+            // Digital Account Selection
+            _buildAccountDropdown(
+              label: 'Akun Digital / Bank',
+              value: _selectedDigitalAccount,
+              accounts: accountProvider.digitalAndBankAccounts,
+              onChanged: (account) {
+                setState(() {
+                  _selectedDigitalAccount = account;
+                });
+              },
+              icon: Icons.smartphone,
+            ),
+
+            const SizedBox(height: 16),
+
+            // Cash Account Selection
+            _buildAccountDropdown(
+              label: 'Akun Kas',
+              value: _selectedCashAccount,
+              accounts: accountProvider.cashAccounts,
+              onChanged: (account) {
+                setState(() {
+                  _selectedCashAccount = account;
+                });
+              },
+              icon: Icons.wallet,
+            ),
+
+            const SizedBox(height: 24),
+
+            // Amount Input
+            MoneyInput(
+              controller: _amountController,
+              labelText: 'Nominal Saldo',
+              hintText: 'Masukkan nominal',
+              validator: (value) => Validators.positiveAmount(value, 'Nominal'),
+              onChanged: (_) {
+                setState(() {});
+                _calculateChange();
+              },
+            ),
+
+            const SizedBox(height: 16),
+
+            // Admin Fee Input
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Mode Selection
-                _buildModeSelection(theme),
-
-                const SizedBox(height: 24),
-
-                // Account Selection
-                _buildAccountSelection(),
-
-                const SizedBox(height: 24),
-
-                // Amount Input
-                _buildAmountSection(),
-
-                const SizedBox(height: 24),
-
-                // Credit Option
-                _buildCreditOption(theme),
-
-                const SizedBox(height: 24),
-
-                // Buyer Name (for credit or optional)
-                _buildBuyerNameInput(),
-
-                const SizedBox(height: 16),
-
-                // Notes
-                _buildNotesInput(),
-
-                const SizedBox(height: 24),
-
-                // Summary Card
-                _buildSummaryCard(theme),
-
-                const SizedBox(height: 32),
-
-                // Submit Button
-                PrimaryButton(
-                  text: 'Simpan Transaksi',
-                  isLoading: transactionProvider.isProcessing,
-                  onPressed: _submitTransaction,
+                Expanded(
+                  child: _usePercentageAdmin
+                      ? TextFormField(
+                          controller: _adminFeeController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          decoration: InputDecoration(
+                            labelText: 'Admin (%)',
+                            suffixText: '%',
+                            helperText: 'Admin: ${Formatters.formatCurrency(_adminFee)}',
+                          ),
+                          validator: (value) => Validators.percentage(value),
+                          onChanged: (_) {
+                            setState(() {});
+                            _calculateChange();
+                          },
+                        )
+                      : MoneyInput(
+                          controller: _adminFeeController,
+                          labelText: 'Biaya Admin',
+                          onChanged: (_) {
+                            setState(() {});
+                            _calculateChange();
+                          },
+                        ),
                 ),
-
-                const SizedBox(height: 16),
+                const SizedBox(width: 8),
+                Column(
+                  children: [
+                    const SizedBox(height: 8),
+                    ChoiceChip(
+                      label: Text(_usePercentageAdmin ? '%' : 'Rp'),
+                      selected: true,
+                      onSelected: (_) {
+                        setState(() {
+                          _usePercentageAdmin = !_usePercentageAdmin;
+                          _adminFeeController.clear();
+                        });
+                      },
+                    ),
+                  ],
+                ),
               ],
             ),
-          );
-        },
+
+            const SizedBox(height: 24),
+
+            // Transaction Summary
+            _buildTransactionSummary(theme),
+
+            const SizedBox(height: 24),
+
+            // Buyer Name (Optional)
+            TextFormField(
+              controller: _buyerNameController,
+              decoration: const InputDecoration(
+                labelText: 'Nama Pembeli (Opsional)',
+                hintText: 'Masukkan nama pembeli',
+                prefixIcon: Icon(Icons.person_outline),
+              ),
+              textCapitalization: TextCapitalization.words,
+            ),
+
+            const SizedBox(height: 16),
+
+            // Credit Toggle
+            SwitchListTile(
+              title: const Text('Transaksi Hutang'),
+              subtitle: const Text('Pembeli belum membayar'),
+              value: _isCredit,
+              onChanged: (value) {
+                setState(() {
+                  _isCredit = value;
+                  if (!value) {
+                    _dueDate = null;
+                  }
+                });
+              },
+              contentPadding: EdgeInsets.zero,
+            ),
+
+            // Due Date (if credit)
+            if (_isCredit) ...[
+              const SizedBox(height: 8),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event),
+                title: Text(
+                  _dueDate != null
+                      ? Formatters.formatDate(_dueDate)
+                      : 'Pilih Jatuh Tempo',
+                ),
+                trailing: _dueDate != null
+                    ? IconButton(
+                        icon: const Icon(Icons.clear),
+                        onPressed: () {
+                          setState(() {
+                            _dueDate = null;
+                          });
+                        },
+                      )
+                    : null,
+                onTap: _selectDueDate,
+              ),
+            ],
+
+            const SizedBox(height: 16),
+
+            // Quick Calc Toggle
+            SwitchListTile(
+              title: const Text('Hitung Kembalian'),
+              value: _showQuickCalc,
+              onChanged: (value) {
+                setState(() {
+                  _showQuickCalc = value;
+                });
+              },
+              contentPadding: EdgeInsets.zero,
+            ),
+
+            // Quick Calc
+            if (_showQuickCalc) ...[
+              const SizedBox(height: 8),
+              _buildQuickCalc(theme),
+            ],
+
+            const SizedBox(height: 16),
+
+            // Notes
+            TextFormField(
+              controller: _notesController,
+              decoration: const InputDecoration(
+                labelText: 'Catatan (Opsional)',
+                hintText: 'Tambahkan catatan',
+                prefixIcon: Icon(Icons.notes),
+              ),
+              maxLines: 2,
+            ),
+
+            const SizedBox(height: 32),
+
+            // Submit Button
+            PrimaryButton(
+              text: 'Simpan Transaksi',
+              isLoading: transactionProvider.isProcessing,
+              onPressed: _submitTransaction,
+            ),
+
+            const SizedBox(height: 16),
+          ],
+        ),
       ),
     );
   }
@@ -278,357 +447,134 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
           runSpacing: 8,
           children: modes.map((mode) {
             final isSelected = _selectedMode == mode;
-            final color = _getModeColor(mode);
-
-            return InkWell(
-              onTap: () {
+            return ChoiceChip(
+              label: Text(mode.label),
+              selected: isSelected,
+              onSelected: (_) {
                 setState(() {
                   _selectedMode = mode;
                 });
-                _calculateProfit();
               },
-              borderRadius: BorderRadius.circular(12),
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: isSelected ? color.withOpacity(0.15) : null,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: isSelected ? color : theme.colorScheme.outline,
-                    width: isSelected ? 2 : 1,
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _getModeIcon(mode),
-                      color: isSelected ? color : theme.colorScheme.onSurfaceVariant,
-                      size: 20,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      mode.label,
-                      style: TextStyle(
-                        color: isSelected ? color : null,
-                        fontWeight: isSelected ? FontWeight.bold : null,
-                      ),
-                    ),
-                  ],
-                ),
+              selectedColor: theme.colorScheme.primary.withOpacity(0.2),
+              labelStyle: TextStyle(
+                color: isSelected
+                    ? theme.colorScheme.primary
+                    : theme.colorScheme.onSurface,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
               ),
             );
           }).toList(),
         ),
         const SizedBox(height: 8),
-        Text(
-          _selectedMode.description,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceVariant.withOpacity(0.5),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.info_outline,
+                size: 16,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _selectedMode.description,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ],
     );
   }
 
-  Widget _buildAccountSelection() {
-    return Consumer<AccountProvider>(
-      builder: (context, accountProvider, _) {
-        final digitalAccounts = accountProvider.digitalAndBankAccounts;
-        final cashAccounts = accountProvider.cashAccounts;
+  Widget _buildAccountDropdown({
+    required String label,
+    required Account? value,
+    required List<Account> accounts,
+    required ValueChanged<Account?> onChanged,
+    required IconData icon,
+  }) {
+    final theme = Theme.of(context);
 
-        return Column(
-          children: [
-            // Digital Account
-            DropdownButtonFormField<Account>(
-              value: _selectedDigitalAccount,
-              decoration: const InputDecoration(
-                labelText: 'Akun Digital / Bank',
-                prefixIcon: Icon(Icons.smartphone),
+    return DropdownButtonFormField<Account>(
+      value: value,
+      decoration: InputDecoration(
+        labelText: label,
+        prefixIcon: Icon(icon),
+      ),
+      items: accounts.map((account) {
+        return DropdownMenuItem(
+          value: account,
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(account.name),
               ),
-              items: digitalAccounts.map((account) {
-                return DropdownMenuItem(
-                  value: account,
-                  child: Row(
-                    children: [
-                      Expanded(child: Text(account.name)),
-                      Text(
-                        Formatters.formatCurrency(account.balance),
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.primary,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }).toList(),
-              onChanged: (value) {
-                setState(() {
-                  _selectedDigitalAccount = value;
-                });
-              },
-              validator: (value) {
-                if (value == null) return 'Pilih akun digital';
-                return null;
-              },
-            ),
-
-            const SizedBox(height: 16),
-
-            // Cash Account
-            DropdownButtonFormField<Account>(
-              value: _selectedCashAccount,
-              decoration: const InputDecoration(
-                labelText: 'Akun Kas',
-                prefixIcon: Icon(Icons.account_balance_wallet),
+              Text(
+                Formatters.formatCurrency(account.balance),
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               ),
-              items: cashAccounts.map((account) {
-                return DropdownMenuItem(
-                  value: account,
-                  child: Row(
-                    children: [
-                      Expanded(child: Text(account.name)),
-                      Text(
-                        Formatters.formatCurrency(account.balance),
-                        style: TextStyle(
-                          color: Theme.of(context).colorScheme.primary,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              }).toList(),
-              onChanged: (value) {
-                setState(() {
-                  _selectedCashAccount = value;
-                });
-              },
-              validator: (value) {
-                if (value == null) return 'Pilih akun kas';
-                return null;
-              },
-            ),
-          ],
+            ],
+          ),
         );
+      }).toList(),
+      onChanged: onChanged,
+      validator: (value) {
+        if (value == null) return 'Pilih akun';
+        return null;
       },
     );
   }
 
-  Widget _buildAmountSection() {
-    return Column(
-      children: [
-        // Amount
-        MoneyInput(
-          controller: _amountController,
-          labelText: 'Nominal Saldo',
-          hintText: 'Contoh: 50.000',
-          validator: (value) => Validators.positiveAmount(value, 'Nominal'),
-          onChanged: (_) => _calculateProfit(),
-        ),
-
-        const SizedBox(height: 16),
-
-        // Admin Fee
-        Row(
-          children: [
-            Expanded(
-              child: MoneyInput(
-                controller: _adminFeeController,
-                labelText: 'Biaya Admin',
-                enabled: _useCustomAdminFee,
-                onChanged: (_) => _calculateProfit(),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Column(
-              children: [
-                const Text('Custom', style: TextStyle(fontSize: 12)),
-                Switch(
-                  value: _useCustomAdminFee,
-                  onChanged: (value) {
-                    setState(() {
-                      _useCustomAdminFee = value;
-                      if (!value) {
-                        // Reset to default
-                        final settings = context.read<SettingsProvider>();
-                        _adminFeeController.text = Formatters.formatNumber(
-                          settings.defaultAdminFee,
-                        );
-                        _calculateProfit();
-                      }
-                    });
-                  },
-                ),
-              ],
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildCreditOption(ThemeData theme) {
+  Widget _buildTransactionSummary(ThemeData theme) {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: _isCredit
-            ? AppColors.warning.withOpacity(0.1)
-            : theme.colorScheme.surfaceVariant.withOpacity(0.5),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: _isCredit
-              ? AppColors.warning.withOpacity(0.3)
-              : theme.colorScheme.outline.withOpacity(0.3),
-        ),
-      ),
-      child: Column(
-        children: [
-          Row(
-            children: [
-              Icon(
-                Icons.access_time,
-                color: _isCredit ? AppColors.warning : theme.colorScheme.onSurfaceVariant,
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Transaksi Hutang',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: _isCredit ? AppColors.warning : null,
-                      ),
-                    ),
-                    Text(
-                      'Pembeli belum membayar (dicatat sebagai piutang)',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              Switch(
-                value: _isCredit,
-                activeColor: AppColors.warning,
-                onChanged: (value) {
-                  setState(() {
-                    _isCredit = value;
-                    if (!value) {
-                      _dueDate = null;
-                    }
-                  });
-                },
-              ),
-            ],
-          ),
-
-          // Due Date (if credit)
-          if (_isCredit) ...[
-            const SizedBox(height: 16),
-            InkWell(
-              onTap: _selectDueDate,
-              child: InputDecorator(
-                decoration: const InputDecoration(
-                  labelText: 'Jatuh Tempo (Opsional)',
-                  prefixIcon: Icon(Icons.event),
-                  border: OutlineInputBorder(),
-                ),
-                child: Text(
-                  _dueDate != null
-                      ? Formatters.formatDate(_dueDate)
-                      : 'Pilih tanggal jatuh tempo',
-                  style: TextStyle(
-                    color: _dueDate != null
-                        ? null
-                        : Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _buildBuyerNameInput() {
-    return TextFormField(
-      controller: _buyerNameController,
-      decoration: InputDecoration(
-        labelText: _isCredit ? 'Nama Pembeli *' : 'Nama Pembeli (Opsional)',
-        prefixIcon: const Icon(Icons.person_outline),
-        hintText: 'Contoh: Budi',
-      ),
-      textCapitalization: TextCapitalization.words,
-      validator: _isCredit
-          ? (value) => Validators.required(value, 'Nama pembeli')
-          : null,
-    );
-  }
-
-  Widget _buildNotesInput() {
-    return TextFormField(
-      controller: _notesController,
-      decoration: const InputDecoration(
-        labelText: 'Catatan (Opsional)',
-        prefixIcon: Icon(Icons.notes),
-        hintText: 'Tambahkan catatan...',
-      ),
-      maxLines: 2,
-    );
-  }
-
-  Widget _buildSummaryCard(ThemeData theme) {
-    final amount = Validators.parseAmount(_amountController.text);
-    final adminFee = Validators.parseAmount(_adminFeeController.text);
-
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: theme.colorScheme.primary.withOpacity(0.1),
+        color: theme.colorScheme.primary.withOpacity(0.05),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: theme.colorScheme.primary.withOpacity(0.2),
         ),
       ),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Ringkasan Transaksi',
-            style: theme.textTheme.titleSmall?.copyWith(
-              fontWeight: FontWeight.bold,
-              color: theme.colorScheme.primary,
-            ),
+          _buildSummaryRow(
+            'Nominal Saldo',
+            Formatters.formatCurrency(_amount),
+            theme,
           ),
-          const SizedBox(height: 16),
-          _buildSummaryRow('Nominal Saldo', Formatters.formatCurrency(amount)),
-          const SizedBox(height: 8),
+          const Divider(height: 16),
           _buildSummaryRow(
             'Biaya Admin',
-            Formatters.formatCurrency(adminFee),
-            color: AppColors.success,
+            '${_selectedMode.isBuyMode ? '+' : '-'}${Formatters.formatCurrency(_adminFee)}',
+            theme,
+            valueColor: _selectedMode.isBuyMode
+                ? AppColors.success
+                : AppColors.error,
           ),
-          const Divider(height: 24),
+          const Divider(height: 16),
           _buildSummaryRow(
-            _getTotalLabel(),
-            Formatters.formatCurrency(_calculatedTotal),
+            _selectedMode.isBuyMode ? 'Pembeli Bayar' : 'Owner Bayar',
+            Formatters.formatCurrency(_totalTransaction),
+            theme,
             isBold: true,
           ),
           const SizedBox(height: 8),
           _buildSummaryRow(
             'Profit',
-            '+${Formatters.formatCurrency(_calculatedProfit)}',
-            color: AppColors.success,
-            isBold: true,
+            Formatters.formatCurrency(_adminFee),
+            theme,
+            valueColor: AppColors.success,
           ),
         ],
       ),
@@ -637,74 +583,69 @@ class _DigitalFormScreenState extends State<DigitalFormScreen> {
 
   Widget _buildSummaryRow(
     String label,
-    String value, {
-    Color? color,
+    String value,
+    ThemeData theme, {
+    Color? valueColor,
     bool isBold = false,
   }) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label),
+        Text(
+          label,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
+          ),
+        ),
         Text(
           value,
-          style: TextStyle(
-            fontWeight: isBold ? FontWeight.bold : null,
-            color: color,
+          style: theme.textTheme.bodyMedium?.copyWith(
+            fontWeight: isBold ? FontWeight.bold : FontWeight.w600,
+            color: valueColor,
           ),
         ),
       ],
     );
   }
 
-  String _getTotalLabel() {
-    switch (_selectedMode) {
-      case DigitalTransactionMode.buyBalance:
-        return 'Pembeli Bayar';
-      case DigitalTransactionMode.sellBalanceDeduct:
-        return 'Pembeli Terima';
-      case DigitalTransactionMode.sellBalanceCash:
-        return 'Pembeli Terima + Admin Tunai';
-      default:
-        return 'Total';
-    }
-  }
-
-  Future<void> _selectDueDate() async {
-    final result = await showDatePicker(
-      context: context,
-      initialDate: _dueDate ?? DateTime.now().add(const Duration(days: 7)),
-      firstDate: DateTime.now(),
-      lastDate: DateTime.now().add(const Duration(days: 365)),
+  Widget _buildQuickCalc(ThemeData theme) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.secondaryContainer.withOpacity(0.3),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Hitung Kembalian',
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 12),
+          MoneyInput(
+            controller: _receivedController,
+            labelText: 'Uang Diterima',
+            onChanged: (_) => _calculateChange(),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text('Kembalian:'),
+              Text(
+                Formatters.formatCurrency(_changeAmount),
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  color: _changeAmount >= 0 ? AppColors.success : AppColors.error,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
-
-    if (result != null) {
-      setState(() {
-        _dueDate = result;
-      });
-    }
-  }
-
-  Color _getModeColor(DigitalTransactionMode mode) {
-    switch (mode) {
-      case DigitalTransactionMode.buyBalance:
-        return AppColors.expense;
-      case DigitalTransactionMode.sellBalanceDeduct:
-      case DigitalTransactionMode.sellBalanceCash:
-        return AppColors.income;
-      default:
-        return AppColors.primary;
-    }
-  }
-
-  IconData _getModeIcon(DigitalTransactionMode mode) {
-    switch (mode) {
-      case DigitalTransactionMode.buyBalance:
-        return Icons.arrow_upward;
-      case DigitalTransactionMode.sellBalanceDeduct:
-      case DigitalTransactionMode.sellBalanceCash:
-        return Icons.arrow_downward;
-      default:
-        return Icons.swap_horiz;
-    }
   }
 }
