@@ -1,5 +1,13 @@
 # Keuangan Owner Tunggal (Offline)
 
+![License](https://img.shields.io/badge/license-MIT-green)
+![Platform](https://img.shields.io/badge/platform-Flutter-blue)
+![Offline](https://img.shields.io/badge/offline--first-yes-success)
+![Target](https://img.shields.io/badge/target-owner%20tunggal-orange)
+![No Accounting](https://img.shields.io/badge/no--accounting--formal-true-red)
+![Simple UX](https://img.shields.io/badge/UX-simple%20by%20design-brightgreen)
+![Status](https://img.shields.io/badge/status-active--development-blueviolet)
+
 Aplikasi pencatatan keuangan **sederhana, fleksibel, dan offline-first**  
 untuk **Owner Tunggal (UMKM perorangan)**.
 
